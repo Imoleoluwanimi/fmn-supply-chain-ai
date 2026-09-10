@@ -124,7 +124,7 @@ st.markdown(
 
 @st.cache_resource
 def load_model():
-    return joblib.load("demand_forecast_model.joblib")
+    return joblib.load("app/demand_forecast_model.joblib")
 
 
 @st.cache_data
