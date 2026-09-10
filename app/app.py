@@ -227,9 +227,10 @@ def main():
 
         with explain_col:
             st.markdown("**Why this SKU is flagged**")
-            with st.spinner("Generating explanation..."):
-                explanation = generate_explanation(sku_row.to_dict())
-            st.write(explanation)
+            if st.button("Generate AI explanation"):
+                with st.spinner("Generating explanation..."):
+                    explanation = generate_explanation(sku_row.to_dict())
+                st.write(explanation)
 
     st.markdown("### Ask a question")
     with st.container(border=True):

@@ -39,7 +39,7 @@ def get_api_key():
     return os.environ.get("GEMINI_API_KEY")
 
 
-def call_openrouter(messages, model=DEFAULT_MODEL, max_tokens=2000):
+def call_gemini(messages, model=DEFAULT_MODEL, max_tokens=2000):
     """Send a chat request to Gemini and return the model's reply as text."""
     api_key = get_api_key()
     if not api_key:
@@ -101,29 +101,66 @@ def _extract_error_message(response):
 
 def generate_explanation(sku_row):
     """
-    Turn one SKU's computed numbers into a plain-English explanation.
-    sku_row is a dict with keys like sku_id, category, closing_stock,
-    forecasted_demand, days_of_cover, lead_time_days, risk_flag.
+    Generate a runtime LLM explanation using the actual computed
+    supply chain metrics for the selected SKU.
     """
-    prompt = (
-        "You are explaining a supply chain risk flag to a non-technical business user. "
-        "Use only the numbers given below. Do not invent any numbers. Keep it to 2 or 3 "
-        "plain sentences, no jargon, no bullet points.\n\n"
-        f"SKU: {sku_row.get('sku_id')}\n"
-        f"Category: {sku_row.get('category')}\n"
-        f"Current stock: {round(sku_row.get('closing_stock', 0), 2)}\n"
-        f"Forecasted daily demand: {round(sku_row.get('forecasted_demand', 0), 2)}\n"
-        f"Days of cover (how many days current stock will last): {round(sku_row.get('days_of_cover', 0), 2)}\n"
-        f"Lead time to get new stock (days): {sku_row.get('lead_time_days')}\n"
-        f"Risk flag assigned: {sku_row.get('risk_flag')}\n\n"
-        "Explain why this SKU received this specific flag, referencing the actual numbers above."
-    )
+
+    risk_flag = str(sku_row.get("risk_flag", "")).lower()
+
+    # Identify the main business issue so the LLM can focus on the
+    # actual reason for the flag rather than producing a generic summary.
+    if "stockout" in risk_flag:
+        risk_driver = "The main concern is that available stock may not last until replenishment arrives."
+    elif "overstock" in risk_flag:
+        risk_driver = "The main concern is that inventory is high relative to expected demand."
+    else:
+        risk_driver = "The SKU does not currently show a major inventory risk."
+
+    prompt = f"""
+You are explaining a supply chain risk decision to a non-technical business user.
+
+Your job is NOT to make a new prediction. The risk flag has already been
+calculated by the application's forecasting and business rules. Your job is
+only to explain the decision using the actual numbers provided.
+
+SKU information:
+- SKU: {sku_row.get("sku_id")}
+- Category: {sku_row.get("category")}
+- Current stock: {round(float(sku_row.get("closing_stock", 0)), 2)}
+- Forecasted daily demand: {round(float(sku_row.get("forecasted_demand", 0)), 2)}
+- Days of cover: {round(float(sku_row.get("days_of_cover", 0)), 2)}
+- Lead time: {sku_row.get("lead_time_days")} days
+- Risk flag: {sku_row.get("risk_flag")}
+- Confidence: {sku_row.get("confidence", "Model-based")}
+
+Main risk driver:
+{risk_driver}
+
+Instructions:
+1. Explain why THIS particular SKU received THIS particular risk flag.
+2. Prioritize the most important risk driver rather than simply listing every number.
+3. Use the actual numbers above.
+4. Do not invent or calculate numbers that are not provided.
+5. Do not change or question the assigned risk flag.
+6. Keep the explanation to 2 or 3 natural sentences.
+7. Use plain business language and no technical jargon.
+8. Do not use a fixed or repetitive template. Vary the sentence structure naturally
+   depending on the situation and which metric is most important.
+"""
 
     messages = [
-        {"role": "system", "content": "You explain supply chain data clearly and simply, grounded only in the numbers you are given."},
+        {
+            "role": "system",
+            "content": (
+                "You explain supply chain decisions clearly and naturally. "
+                "Your explanations must be grounded entirely in the supplied "
+                "SKU data and must not invent facts."
+            ),
+        },
         {"role": "user", "content": prompt},
     ]
-    return call_openrouter(messages)
+
+    return call_gemini(messages)
 
 
 def answer_question(question, all_flags_df):
@@ -159,4 +196,4 @@ def answer_question(question, all_flags_df):
         {"role": "system", "content": "You answer questions about supply chain data clearly and simply, grounded only in the data you are given."},
         {"role": "user", "content": prompt},
     ]
-    return call_openrouter(messages)
+    return call_gemini(messages)
