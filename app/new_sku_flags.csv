@@ -1,0 +1,4 @@
+sku_id,avg_daily_sales,latest_stock,lead_time_days,category,days_of_history,days_of_cover,risk_flag
+SKU-2000,220.08333333333334,0.0,7,Snacks,12,0.0,stockout risk (early estimate)
+SKU-2001,283.25,0.0,10,Beverages,12,0.0,stockout risk (early estimate)
+SKU-2002,268.0833333333333,0.0,5,Flour,12,0.0,stockout risk (early estimate)
