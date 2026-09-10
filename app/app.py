@@ -129,9 +129,9 @@ def load_model():
 
 @st.cache_data
 def load_bundled_flags():
-    established = pd.read_csv("established_sku_flags.csv")
-    new_skus = pd.read_csv("new_sku_flags.csv")
-
+    established = pd.read_csv("app/established_sku_flags.csv")
+    new_skus = pd.read_csv("app/new_sku_flags.csv")
+    
     # Work with whatever format these CSVs are currently in. Older versions
     # do not have a separate confidence column, and instead bake the
     # "(early estimate)" note directly into risk_flag. Handle both cases
