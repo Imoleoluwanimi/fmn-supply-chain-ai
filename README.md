@@ -1,415 +1,145 @@
 # FMN Supply Chain Demand Forecasting & Risk Monitor
 
+A tool that predicts future demand for FMN's products (SKUs) and flags which ones are at risk of running out of stock or sitting with too much stock, then explains the results in plain business language.
+
+Live app: https://fmn-supply-chain-ai-st7dbdmxbgbxzlspm8ycz7.streamlit.app/
+
 ## 1. Problem Understanding
 
-The goal of this project is to help Flour Mills of Nigeria (FMN) anticipate potential inventory problems before they happen.
+The goal here is to help FMN spot inventory problems before they happen. The data has daily sales, stock levels, replenishment, and supplier lead-time information for a number of SKUs.
 
-The available data contains daily sales, inventory, replenishment, and supplier lead-time information for multiple SKUs. I interpreted the business problem as two connected tasks:
+I broke the problem into two connected steps:
+1. Predict future demand for each SKU using its own sales history.
+2. Turn that prediction into a risk signal by comparing expected demand against current stock and how long it takes to restock.
 
-1. **Forecast future demand** for each SKU using its historical demand patterns.
-2. **Translate the forecast into an inventory risk signal** by comparing expected demand with the inventory currently available and the time required to replenish it.
+The system keeps prediction and decision-making separate:
+- A machine learning model predicts expected demand.
+- A simple rule-based engine uses that prediction, along with current stock, demand trend, and lead time, to decide if an SKU is at stockout risk or overstock risk.
+- A Gemini-powered layer turns the result into plain business language.
 
-The system therefore separates prediction from business decision-making:
-
-* A machine learning model forecasts expected demand.
-* A rule-based risk engine uses the forecast, current stock, demand trend, and lead time to identify potential stockout or overstock risk.
-* A Gemini-powered explanation layer translates the result into simple business language for users.
-
-The LLM does not make the inventory-risk decision. It explains a decision that has already been produced by the forecasting and risk-engine components.
-
----
+The AI does not decide the risk level. It only explains a decision that the forecast and rules have already made.
 
 ## 2. Approach
 
-### High-Level Architecture
+### High-level flow
 
-```text
-Raw Supply Chain Data
-        |
-        v
-Data Validation & Cleaning
-        |
-        v
-SKU History Analysis
-        |
-        +----------------------+
-        |                      |
-        v                      v
-Established SKUs           New SKUs
-        |                      |
-        v                      v
-Feature Engineering       Simple Early Estimate
-        |
-        v
-Demand Forecasting Model
-        |
-        v
-Expected Demand
-        |
-        v
-Inventory Risk Engine
-        |
-        +-----------------------------+
-        |              |              |
-        v              v              v
-    Stockout       Overstock          OK
-      Risk           Risk
-        |
-        v
-Streamlit Dashboard
-        |
-        v
-Gemini Explanation / Q&A
-```
+Raw data goes through cleaning and validation, then SKUs are split into "established" (enough history to forecast) and "new" (too little history). Established SKUs go through feature engineering and a demand forecasting model. New SKUs get a simpler early estimate. The forecast feeds into the inventory risk engine, which flags each SKU as stockout risk, overstock risk, or OK. All of this shows up on a Streamlit dashboard, where Gemini explains the results and answers questions.
 
 ### Data
 
-The dataset contains **4,551 observations across 28 SKUs**, covering the period from **January 1, 2026 to June 29, 2026**.
+4,551 rows across 28 SKUs, covering January 1 to June 29, 2026. Fields include the date, SKU ID, category, units sold, units received, closing stock, and lead time in days. 25 SKUs have enough history to forecast normally; 3 SKUs only have about 12 days of history.
 
-The main fields are:
+### Data preparation
 
-* `date` - observation date
-* `sku_id` - product identifier
-* `category` - product category
-* `units_sold` - units sold on that day
-* `units_received` - units received through replenishment
-* `closing_stock` - inventory remaining at the end of the day
-* `lead_time_days` - expected replenishment lead time
+The pipeline checks that the right columns are present, fixes date formats, standardizes categories, checks that lead times make sense, sorts everything by SKU and date, fills in missing values, and builds historical demand features (like 7 day and 14 day averages) for the SKUs that have enough history.
 
-The dataset contains 25 established SKUs and 3 SKUs with only around 12 days of history.
+### New vs. established SKUs
 
----
+I used 30 past observations as the cutoff for "enough history." Below that, the forecasting features (like 7 day and 14 day patterns) are not reliable, so the 3 new SKUs instead get an early estimate based on their average daily sales and latest stock, and the app clearly labels this as "Early estimate, limited history" so it is never confused with a real model-based forecast.
 
-## 3. Data Preparation
+### Demand forecasting
 
-The data preparation pipeline:
+This is a time-series problem, but instead of a traditional model like ARIMA, I turned the sales history into features a regression model can learn from: yesterday's demand, demand from a week ago, recent 7 day and 14 day averages, a demand trend value, and the day of the week. All rolling averages are shifted so the model only ever sees information that would genuinely have been available before the day it's predicting.
 
-* validates that the required columns are present
-* converts dates into the correct format
-* standardizes category values
-* checks lead-time consistency for each SKU
-* sorts observations by SKU and date
-* handles missing demand and inventory values
-* separates new SKUs from established SKUs
-* creates historical demand features for established SKUs
+### Why this approach
 
-### New vs Established SKUs
+Several approaches could work here, from simple moving averages to ARIMA-style statistical models to deep learning sequence models. I compared a 7 day average baseline against Linear Regression, Random Forest, and Gradient Boosting, all tested the same way: trained on data up to May 30, 2026, and tested on the following month, using a chronological split rather than a random one so the setup mirrors real forecasting, learning from the past and being tested on a later period.
 
-A history threshold of **30 observations** was used to separate new SKUs from established SKUs.
-
-This was necessary because the forecasting features depend on historical observations such as 7-day and 14-day demand patterns.
-
-The three new SKUs did not have enough history to make the same model-based forecast reliable.
-
-Instead, the system uses their average daily sales and latest inventory to produce an early inventory estimate and explicitly labels the result:
-
-> Early estimate, limited history
-
-This prevents the system from presenting a low-history estimate with the same confidence as a model-based forecast.
-
----
-
-## 4. Demand Forecasting
-
-The forecasting problem is a **time-series forecasting problem formulated as supervised regression**.
-
-Rather than using a traditional statistical forecasting model such as ARIMA, historical demand was transformed into features that a regression model could learn from.
-
-The main features include:
-
-* `sold_lag_1` - demand from the previous day
-* `sold_lag_7` - demand from seven days earlier
-* `sold_roll_mean_7` - recent 7-day average demand
-* `sold_roll_mean_14` - recent 14-day average demand
-* `demand_trend` - change between recent and previous demand averages
-* `day_of_week` - captures weekly demand patterns
-
-The rolling features are shifted so that the model uses information available before the prediction period rather than the actual demand being predicted.
-
-### Why this approach?
-
-Several approaches could be used for demand forecasting, including:
-
-* moving-average/statistical forecasting
-* ARIMA-type models
-* feature-based machine learning
-* deep learning sequence models such as LSTMs
-
-A 7-day historical average was first used as a baseline.
-
-For the machine-learning approach, Linear Regression, Random Forest and Gradient Boosting were compared using the same temporal train/test setup.
-
-The feature-based approach was selected because it allowed historical demand, recent trends and calendar information to be combined in one model while keeping the solution relatively simple and appropriate for the size of the available dataset.
-
----
-
-## 5. Model Selection and Evaluation
-
-A chronological train/test split was used rather than randomly shuffling the data.
-
-The model was trained on observations up to **May 30, 2026** and evaluated on the subsequent period from **May 31 to June 29, 2026**.
-
-This preserves the real-world forecasting setup: the model learns from the past and is tested on a later period.
-
-### Model comparison
-
-| Model                  |   MAE |   MAPE |
-| ---------------------- | ----: | -----: |
+| Model | MAE | MAPE |
+|---|---|---|
 | 7-day average baseline | 63.16 | 24.46% |
-| Linear Regression      | 56.59 | 22.46% |
-| Random Forest          | 58.42 | 22.47% |
-| Gradient Boosting      | 55.59 | 21.56% |
+| Linear Regression | 56.59 | 22.46% |
+| Random Forest | 58.42 | 22.47% |
+| Gradient Boosting | 55.59 | 21.56% |
 
-Gradient Boosting produced the lowest error among the candidate models and was selected for the final model.
+Gradient Boosting had the lowest error and was chosen as the final model (100 trees, max depth of 3, learning rate 0.05). On the untouched test month, it reached an MAE of about 55.17 units and a MAPE of about 21.67%, an improvement over the 63.16 unit baseline. MAE tells you the average size of the error in actual units; MAPE tells you the same thing as a percentage. The feature-based approach was chosen because it combines historical demand, recent trends, and calendar information in one model while staying simple enough for the size of the available data.
 
-The model was then tuned using a separate validation window. The selected configuration was:
 
-* `n_estimators = 100`
-* `max_depth = 3`
-* `learning_rate = 0.05`
+### Inventory risk engine
 
-### Final performance
+The forecast alone doesn't tell you if an SKU is risky, so I turn it into "days of cover": Days of Cover = Current Stock / Expected Daily Demand
 
-On the untouched test period, the final model achieved approximately:
 
-* **MAE: 55.17 units**
-* **MAPE: 21.67%**
+An SKU is flagged **stockout risk** when Days of Cover is less than the lead time, meaning stock could run out before a new order arrives. It's flagged **overstock risk** when Days of Cover is more than 3 times the lead time AND demand is flat or falling, meaning there's a lot more stock on hand than is actually needed soon. These cutoffs are reasonable business rules for this assessment, but in a real deployment they should be tuned using FMN's actual service-level targets and the real cost of stockouts versus excess stock.
 
-The model improved on the 7-day-average baseline, which had a test MAE of approximately 63.16 units.
+### The Streamlit app
 
-MAE is reported in units because it represents the average absolute difference between predicted and actual demand. MAPE provides a percentage-based view of the forecasting error.
+Loads the trained model and the pre-computed risk results, shows how many SKUs are being monitored, highlights the ones that need attention, and shows expected demand, current stock, days of cover, and lead time for each SKU. It also lets you upload a new CSV, which reruns the full pipeline (not just the precomputed results) on your new data, generates a plain-language explanation per SKU using Gemini, and answers free text questions about the current SKU data.
 
----
+### Gemini's role
 
-## 6. Inventory Risk Engine
+For each SKU, the app sends Gemini the already-computed numbers (SKU, category, stock, forecast, days of cover, lead time, risk flag, confidence), and Gemini's only job is to explain that result in plain language. It never changes or invents the risk decision. This is closer to what's called structured-data grounding than a full RAG setup with a vector database: the app picks the relevant rows from the current data and hands them straight to Gemini as context.
 
-The forecast itself does not determine whether an SKU is risky.
-
-The system converts expected demand into a business-oriented inventory metric called **days of cover**:
-
-```text
-Days of Cover = Current Stock / Expected Daily Demand
-```
-
-This estimates approximately how many days the current inventory can support expected demand.
-
-### Stockout risk
-
-An SKU is flagged as **stockout risk** when:
-
-```text
-Days of Cover < Lead Time
-```
-
-The reasoning is that the available inventory may be exhausted before replenishment arrives.
-
-### Overstock risk
-
-An SKU is flagged as **overstock risk** when:
-
-```text
-Days of Cover > 3 × Lead Time
-AND
-Demand Trend <= 0
-```
-
-This identifies cases where the available inventory covers substantially more time than the replenishment lead time while demand is flat or decreasing.
-
-These thresholds are business heuristics used for the assessment. In a production system, they should be calibrated using historical stockout/overstock outcomes, service-level targets, inventory carrying costs and the business cost of stockouts.
-
----
-
-## 7. Streamlit Application
-
-The Streamlit application provides an interactive interface for monitoring SKU-level demand and inventory risk.
-
-The dashboard:
-
-* loads the trained forecasting model
-* loads precomputed risk results
-* displays the total number of SKUs monitored
-* highlights SKUs requiring attention
-* shows the risk status for individual SKUs
-* displays expected demand, current stock, days of cover and lead time
-* allows users to upload a new CSV using the expected schema
-* reruns the data preparation and risk pipeline on uploaded data
-* generates natural-language explanations using Gemini
-* supports questions about the available SKU risk data
-
-The application uses the same underlying pipeline for uploaded data rather than relying only on the precomputed results bundled with the project.
-
----
-
-## 8. Gemini Explanation Layer
-
-Gemini is used as an explanation and interaction layer rather than as the decision-maker.
-
-For each SKU, the application sends the already-computed information, such as:
-
-* SKU
-* category
-* current stock
-* forecasted demand
-* days of cover
-* lead time
-* risk flag
-* confidence level
-
-The model is instructed to explain the existing result using only the information provided.
-
-This separation is intentional:
-
-```text
-ML Model
-   ↓
-Forecast
-   ↓
-Risk Engine
-   ↓
-Risk Decision
-   ↓
-Gemini
-   ↓
-Human-readable Explanation
-```
-
-This reduces the risk of an LLM inventing or independently changing an operational risk decision.
-
-The current implementation is better described as **structured-data grounding** rather than traditional vector-database RAG. The application selects relevant rows from the current dataset and provides them directly to the LLM as context.
-
----
-
-## 9. Project Structure
-
-```text
+### Project structure
 fmn-supply-chain-ai/
 │
 ├── app/
-│   ├── app.py
-│   ├── data_prep.py
-│   ├── explain.py
-│   ├── demand_forecast_model.joblib
-│   ├── established_sku_flags.csv
-│   ├── new_sku_flags.csv
-│   └── requirements.txt
+│ ├── app.py
+│ ├── data_prep.py
+│ ├── explain.py
+│ ├── demand_forecast_model.joblib
+│ ├── established_sku_flags.csv
+│ ├── new_sku_flags.csv
+│ └── requirements.txt
 │
 └── notebooks/
-    ├── 01_data_prep (1).ipynb
-    ├── 02_model_and_risk_flags (1).ipynb
-    ├── model_comparison.csv
-    ├── project1_features.csv
-    └── project1_supply_chain_demand (1).csv
-```
+├── 01_data_prep.ipynb
+├── 02_model_and_risk_flags.ipynb
+├── model_comparison.csv
+├── project1_features.csv
+└── project1_supply_chain_demand.csv
 
----
 
-## 10. How to Run
+## 3. How to Run
 
 ### Requirements
+- Python 3.10+
+- pip
+- Streamlit, pandas, numpy, scikit-learn, joblib, requests, python-dotenv
+- A Google Gemini API key
 
-* Python 3.10+
-* pip
-* Streamlit
-* pandas
-* numpy
-* scikit-learn
-* joblib
-* requests
-* python-dotenv
-* Google Gemini API access
-
-Install the Python dependencies with:
-
-```bash
+Install everything with:
 pip install -r app/requirements.txt
-```
 
-### Run the Streamlit application
-
+### Run the app
 From the project root:
-
-```bash
 streamlit run app/app.py
-```
 
-The application will open in the browser.
+### Gemini API key
+Provide your key through Streamlit secrets or an environment variable. Never hard-code it into the source files. On Streamlit Cloud, add it under the app's Secrets settings.
 
-### Gemini API configuration
+### Deployed app
+Streamlit Cloud: https://fmn-supply-chain-ai-st7dbdmxbgbxzlspm8ycz7.streamlit.app/
 
-The Gemini API key should be provided through Streamlit secrets or an environment variable.
+## 4. Limitations & Next Steps
 
-Do not hard-code the API key in the source code.
+This was built inside a 96-hour technical assessment, so there's a lot that would need work before real production use:
 
-For Streamlit deployment, add the required API key to the application's Secrets configuration.
+- **Limited data:** about six months of history across 28 SKUs. More data would allow a better look at seasonal patterns and unusual demand spikes.
+- **New SKU forecasting:** the 3 new SKUs use a simpler early estimate instead of the full model, since they don't have enough history yet. A production version could borrow patterns from similar SKUs or categories to make a smarter cold-start guess.
+- **Risk thresholds:** the stockout and overstock cutoffs are reasonable rules, not tuned on FMN's real outcomes. They should be validated against real stockout and overstock history and FMN's actual service-level needs.
+- **Missing values:** the current pipeline fills gaps using forward and backward filling. A production system would need to be more careful that future data never leaks into a past prediction.
+- **Forecasting model choice:** Gradient Boosting won in this comparison, but that doesn't make it the best choice forever. It should be benchmarked against classical time-series methods and more advanced models as more data comes in.
+- **LLM reliability:** Gemini only explains results and answers questions, but LLM output can still be wrong sometimes. A production version would need structured outputs, evaluation, and human review for anything high-impact.
+- **Deployment:** this is an assessment prototype, not a production system. Real use would need authentication, monitoring, logging, scheduled data updates, and integration with FMN's actual inventory systems.
 
-### Deployed Application
+With more time, I'd prioritize:
+1. Validating the risk thresholds against real FMN inventory outcomes.
+2. Adding more historical demand data.
+3. Benchmarking against classical time-series forecasting methods.
+4. Improving forecasts for new SKUs with limited history.
+5. Adding automated retraining as new data comes in.
+6. Adding monitoring for model and data quality.
+7. Connecting to a live inventory or ERP data source.
+8. Adding authentication and role-based access.
+9. Testing the LLM explanations against known business scenarios.
+10. Adding alerts for high-priority risks.
 
-**Streamlit Cloud:**
-https://fmn-supply-chain-ai-st7dbdmxbgbxzlspm8ycz7.streamlit.app/
+## 5. Key Takeaway
 
----
+The project combines machine learning, business rules, and generative AI, with each component having a clear responsibility:
+- **Machine learning** estimates future demand.
+- **Business rules** translate demand and inventory information into actionable risk flags.
+- **Generative AI** explains those results in language that is easier for a business user to understand.
 
-## 11. Limitations
-
-This project was developed within a 96-hour technical assessment, so there are several areas that could be improved for production use.
-
-### Limited historical data
-
-The dataset covers approximately six months and only 28 SKUs. More historical data would allow stronger analysis of seasonal patterns and unusual demand periods.
-
-### New SKU forecasting
-
-The three new SKUs have very limited history. The current system therefore uses a simpler early estimate rather than forcing them through the established-SKU forecasting model.
-
-A production system could use category-level information, similar-product behavior or hierarchical/global forecasting to improve cold-start predictions.
-
-### Risk thresholds
-
-The stockout and overstock thresholds are rule-based heuristics. They should be validated against historical inventory outcomes and FMN's actual service-level and inventory-cost requirements.
-
-### Missing-value handling
-
-The current assessment pipeline uses forward and backward filling for some missing values. In a production forecasting system, imputation should be designed carefully around the exact prediction timestamp so that future observations cannot influence past predictions.
-
-### Forecasting approach
-
-Gradient Boosting performed best among the models tested in this assessment, but that does not mean it is universally the best forecasting architecture.
-
-A production implementation should benchmark it against approaches such as ARIMA/exponential smoothing and potentially more advanced global or sequence-based forecasting models as the amount of data grows.
-
-### LLM reliability
-
-Gemini is used only for explanations and data-grounded Q&A, but LLM-generated text can still contain errors. Production deployment would benefit from structured outputs, automated evaluation, stronger guardrails and human review for high-impact decisions.
-
-### Deployment
-
-The current application is designed as an assessment prototype rather than a complete production inventory-management system. A production version would require authentication, monitoring, logging, model/version management, scheduled data pipelines and integration with operational inventory systems.
-
----
-
-## 12. Next Steps
-
-With additional development time, I would prioritize:
-
-1. Validate risk thresholds with historical FMN inventory outcomes.
-2. Add more historical demand data.
-3. Benchmark the forecasting model against classical time-series methods.
-4. Improve cold-start forecasting for new SKUs.
-5. Add automated model retraining as new data becomes available.
-6. Add model and data-quality monitoring.
-7. Integrate the system with a live inventory or ERP data source.
-8. Add authentication and role-based access to the dashboard.
-9. Evaluate the LLM explanation layer using a set of known business scenarios.
-10. Add alerts for high-priority inventory risks.
-
----
-
-## 13. Key Takeaway
-
-The project combines **machine learning, business rules and generative AI**, with each component having a clear responsibility:
-
-* **Machine learning** estimates future demand.
-* **Business rules** translate demand and inventory information into actionable risk flags.
-* **Generative AI** explains those results in language that is easier for a business user to understand.
-
-The key design principle is to keep the operational decision deterministic and use the LLM to improve accessibility and explanation rather than allowing the LLM to make the inventory-risk decision itself.
+The key design principle is to keep the operational decision deterministic and use the LLM to improve accessibility and explanation, rather than allowing the LLM to make the inventory-risk decision itself.
